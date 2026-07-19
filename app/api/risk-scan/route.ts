@@ -30,6 +30,7 @@ function extractModelContent(data: unknown) {
   const payload = data as Record<string, any>;
   const choice = payload.choices?.[0];
   const content = choice?.message?.content;
+  const reasoningContent = choice?.message?.reasoning_content;
 
   if (typeof content === "string") return content;
   if (Array.isArray(content)) {
@@ -38,6 +39,8 @@ function extractModelContent(data: unknown) {
       .filter(Boolean)
       .join("\n");
   }
+  // Some reasoning models return the requested JSON in reasoning_content while content is empty.
+  if (typeof reasoningContent === "string" && reasoningContent.trim()) return reasoningContent;
   if (typeof choice?.text === "string") return choice.text;
   if (typeof payload.output_text === "string") return payload.output_text;
   if (Array.isArray(payload.output)) {
