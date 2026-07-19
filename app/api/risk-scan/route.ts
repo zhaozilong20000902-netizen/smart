@@ -15,8 +15,26 @@ function parseModelJson(value: unknown) {
     return JSON.parse(cleaned);
   } catch {
     const start = cleaned.indexOf("{");
-    const end = cleaned.lastIndexOf("}");
-    if (start >= 0 && end > start) return JSON.parse(cleaned.slice(start, end + 1));
+    if (start >= 0) {
+      let depth = 0;
+      let inString = false;
+      let escaped = false;
+      for (let index = start; index < cleaned.length; index += 1) {
+        const character = cleaned[index];
+        if (inString) {
+          if (escaped) escaped = false;
+          else if (character === "\\") escaped = true;
+          else if (character === '"') inString = false;
+          continue;
+        }
+        if (character === '"') inString = true;
+        else if (character === "{") depth += 1;
+        else if (character === "}") {
+          depth -= 1;
+          if (depth === 0) return JSON.parse(cleaned.slice(start, index + 1));
+        }
+      }
+    }
     throw new Error("模型未返回有效JSON");
   }
 }
