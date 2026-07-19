@@ -32,12 +32,13 @@ function extractModelContent(data: unknown) {
   const content = choice?.message?.content;
   const reasoningContent = choice?.message?.reasoning_content;
 
-  if (typeof content === "string") return content;
+  if (typeof content === "string" && content.trim()) return content;
   if (Array.isArray(content)) {
-    return content
+    const joinedContent = content
       .map((part) => part?.text || part?.content || "")
       .filter(Boolean)
       .join("\n");
+    if (joinedContent.trim()) return joinedContent;
   }
   // Some reasoning models return the requested JSON in reasoning_content while content is empty.
   if (typeof reasoningContent === "string" && reasoningContent.trim()) return reasoningContent;
