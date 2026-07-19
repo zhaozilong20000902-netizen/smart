@@ -37,6 +37,18 @@ const demoBooks: Book[] = [
 
 const formatSize = (bytes: number) => bytes < 1024 * 1024 ? `${(bytes / 1024).toFixed(1)} KB` : `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 
+async function readJsonResponse<T = Record<string, any>>(response: Response, fallback: string) {
+  const text = await response.text();
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    const type = response.headers.get("content-type") || "未知类型";
+    throw new Error(response.ok
+      ? fallback
+      : `接口返回了非JSON响应（HTTP ${response.status}，${type}）。请确认EdgeOne已部署最新版本。`);
+  }
+}
+
 export function ZhiheApp() {
   const [view, setView] = useState<View>("scan");
   const [mobileNav, setMobileNav] = useState(false);
@@ -89,7 +101,7 @@ export function ZhiheApp() {
     data.append("file", selected);
     try {
       const response = await fetch("/api/submission/extract", { method: "POST", body: data });
-      const payload = await response.json();
+      const payload = await readJsonResponse(response, "文件解析接口返回了无法识别的响应");
       if (!response.ok) throw new Error(payload.error || "文件解析失败");
       setSubmission(payload.text);
       setFile({ name: payload.name, size: payload.size, type: payload.type, pages: payload.pages, characterCount: payload.characterCount, warnings: payload.warnings });
@@ -148,7 +160,7 @@ export function ZhiheApp() {
           textbookEvidence,
         }),
       });
-      const payload = await response.json();
+      const payload = await readJsonResponse<ScanResponse & { error?: string }>(response, "风险检查接口返回了无法识别的响应");
       if (!response.ok) throw new Error(payload.error || "检查失败");
       setResult(payload);
       setReviews(Object.fromEntries(payload.riskItems.map((item: RiskItem) => [item.id, item.status])));
@@ -189,7 +201,7 @@ export function ZhiheApp() {
       const form = new FormData();
       form.append("file", selected);
       const response = await fetch("/api/submission/extract", { method: "POST", body: form });
-      const payload = await response.json();
+      const payload = await readJsonResponse(response, "教材解析接口返回了无法识别的响应");
       if (!response.ok) throw new Error(payload.error || "教材解析失败");
       const chunks = splitTextbookText(payload.text);
       if (!chunks.length) throw new Error("教材没有可用于检索的文本");
