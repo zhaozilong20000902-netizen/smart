@@ -29,27 +29,26 @@ function extractModelContent(data: unknown) {
   if (!data || typeof data !== "object") return undefined;
   const payload = data as Record<string, any>;
   const choice = payload.choices?.[0];
-  const content = choice?.message?.content;
-  const reasoningContent = choice?.message?.reasoning_content;
-
-  if (typeof content === "string" && content.trim()) return content;
-  if (Array.isArray(content)) {
-    const joinedContent = content
-      .map((part) => part?.text || part?.content || "")
-      .filter(Boolean)
-      .join("\n");
-    if (joinedContent.trim()) return joinedContent;
+  const candidates = [
+    choice?.message?.content,
+    choice?.message?.reasoning_content,
+    choice?.text,
+    payload.output_text,
+  ];
+  for (const candidate of candidates) {
+    if (typeof candidate === "string" && candidate.trim()) return candidate;
+    if (Array.isArray(candidate)) {
+      const joined = candidate.map((part) => part?.text || part?.content || "").filter(Boolean).join("\n");
+      if (joined.trim()) return joined;
+    }
   }
-  // Some reasoning models return the requested JSON in reasoning_content while content is empty.
-  if (typeof reasoningContent === "string" && reasoningContent.trim()) return reasoningContent;
-  if (typeof choice?.text === "string") return choice.text;
-  if (typeof payload.output_text === "string") return payload.output_text;
   if (Array.isArray(payload.output)) {
-    return payload.output
+    const joinedOutput = payload.output
       .flatMap((item) => item?.content || [])
       .map((part) => part?.text || "")
       .filter(Boolean)
       .join("\n");
+    if (joinedOutput.trim()) return joinedOutput;
   }
 
   return undefined;
@@ -127,7 +126,7 @@ export async function POST(request: NextRequest) {
       mode: analysis.mode,
       storage: "none",
       checkedAt: new Date().toISOString(),
-    });
+    }, { headers: { "x-zhihe-risk-parser": "candidate-fields-v3" } });
   } catch (error) {
     console.error("risk-scan failed", error);
     return NextResponse.json(
