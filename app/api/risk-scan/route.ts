@@ -21,6 +21,36 @@ function parseModelJson(value: unknown) {
   }
 }
 
+function preview(value: unknown) {
+  return JSON.stringify(value, null, 2)?.slice(0, 1200);
+}
+
+function extractModelContent(data: unknown) {
+  if (!data || typeof data !== "object") return undefined;
+  const payload = data as Record<string, any>;
+  const choice = payload.choices?.[0];
+  const content = choice?.message?.content;
+
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content
+      .map((part) => part?.text || part?.content || "")
+      .filter(Boolean)
+      .join("\n");
+  }
+  if (typeof choice?.text === "string") return choice.text;
+  if (typeof payload.output_text === "string") return payload.output_text;
+  if (Array.isArray(payload.output)) {
+    return payload.output
+      .flatMap((item) => item?.content || [])
+      .map((part) => part?.text || "")
+      .filter(Boolean)
+      .join("\n");
+  }
+
+  return undefined;
+}
+
 async function runModel(input: Record<string, unknown>, redacted: string): Promise<{ result: RiskScanResult; mode: string }> {
   const endpoint = process.env.MODEL_API_URL;
   const apiKey = process.env.MODEL_API_KEY;
@@ -56,8 +86,20 @@ async function runModel(input: Record<string, unknown>, redacted: string): Promi
     });
     if (!response.ok) throw new Error(`模型接口返回 ${response.status}`);
     const data = await response.json();
-    const raw = data?.choices?.[0]?.message?.content;
-    return { result: riskScanSchema.parse(parseModelJson(raw)), mode: "model" };
+    const raw = extractModelContent(data);
+    if (!raw) {
+      console.error("risk-scan empty model content", preview(data));
+      throw new Error("模型接口响应中没有找到可解析内容");
+    }
+
+    const parsed = parseModelJson(raw);
+    const result = riskScanSchema.safeParse(parsed);
+    if (!result.success) {
+      console.error("risk-scan invalid model schema", result.error.flatten(), preview(parsed));
+      throw new Error("模型JSON结构不符合风险报告格式");
+    }
+
+    return { result: result.data, mode: "model" };
   } finally {
     clearTimeout(timeout);
   }
