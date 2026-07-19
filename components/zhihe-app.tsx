@@ -252,7 +252,7 @@ export function ZhiheApp() {
   return (
     <div className="app-shell">
       <aside className={mobileNav ? "sidebar sidebar-open" : "sidebar"}>
-        <div className="brand"><div className="brand-mark"><ShieldCheck /></div><div><strong>智核</strong><span>AI RISK REVIEW</span></div></div>
+        <div className="brand"><div className="brand-mark"><ShieldCheck /></div><div><strong>智核</strong><span>AI TEACHING RISK REVIEW</span></div></div>
         <button className="mobile-close" onClick={() => setMobileNav(false)} aria-label="关闭导航"><X /></button>
         <div className="side-label">工作台</div>
         <nav>{nav.map(({ id, label, icon: Icon }) => <button key={id} className={view === id ? "nav-item active" : "nav-item"} onClick={() => { setView(id); setMobileNav(false); }}><Icon /><span>{label}</span><ChevronRight /></button>)}</nav>
@@ -265,11 +265,11 @@ export function ZhiheApp() {
         <header className="topbar">
           <button className="mobile-menu" onClick={() => setMobileNav(true)}><LayoutDashboard /> 菜单</button>
           <div className="crumb">教学AI治理 <ChevronRight /> <strong>{nav.find((item) => item.id === view)?.label}</strong></div>
-          <div className="api-pill"><span className="status-dot" />安全会话 · 原文不留存</div>
+          <div className="api-pill"><span className="status-dot" />AI辅助核查 · 原文不留存</div>
         </header>
 
         {view === "scan" && <section className="page scan-page">
-          <div className="hero-row"><div><span className="eyebrow"><Sparkles /> AI辅助过程性核验</span><h1>上传作业，开始风险检查</h1><p>从作品中发现教材冲突、事实来源、声明一致性、隐私与版权线索，再由教师复核确认。</p></div><div className="hero-badge"><Gauge /><div><strong>不计算AI率</strong><span>系统不会给出不可靠的AI生成概率</span></div></div></div>
+          <div className="hero-row"><div><span className="eyebrow"><Sparkles /> 人工智能辅助教师复核</span><h1>人工智能使用风险核查</h1><p>用人工智能辅助核查学生人工智能使用风险：对照教材、来源、使用声明与隐私版权线索，最后由教师复核定案。</p></div><div className="hero-badge"><Gauge /><div><strong>AI辅助，教师定案</strong><span>不计算“AI率”，不自动判定作弊或处罚</span></div></div></div>
 
           <div className="workspace-grid">
             <div className="panel upload-panel">
