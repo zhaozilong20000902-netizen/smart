@@ -6,7 +6,7 @@ import { riskScanSchema } from "@/lib/schema";
 import type { RiskScanResult } from "@/lib/types";
 
 export const runtime = "nodejs";
-export const maxDuration = 90;
+export const maxDuration = 30;
 
 function parseModelJson(value: unknown) {
   if (typeof value !== "string") return value;
@@ -61,7 +61,7 @@ async function runModel(input: Record<string, unknown>, redacted: string): Promi
   if (!endpoint || !apiKey || !model) return { result: demoRiskResult, mode: "demo" };
 
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 85_000);
+  const timeout = setTimeout(() => controller.abort(), 24_000);
   try {
     const response = await fetch(endpoint, {
       method: "POST",
@@ -70,6 +70,8 @@ async function runModel(input: Record<string, unknown>, redacted: string): Promi
       body: JSON.stringify({
         model,
         temperature: 0.1,
+        max_tokens: 2400,
+        enable_thinking: false,
         response_format: { type: "json_object" },
         messages: [
           { role: "system", content: riskScanSystemPrompt },
@@ -129,6 +131,16 @@ export async function POST(request: NextRequest) {
     }, { headers: { "x-zhihe-risk-parser": "candidate-fields-v3" } });
   } catch (error) {
     console.error("risk-scan failed", error);
+    if (error instanceof Error && error.name === "AbortError") {
+      return NextResponse.json({
+        ...demoRiskResult,
+        redactionHits: hits.map(({ type, replacement }) => ({ type, replacement })),
+        mode: "demo",
+        modelWarning: "模型响应超时，已返回演示结果。可更换响应更快的模型，或稍后重试。",
+        storage: "none",
+        checkedAt: new Date().toISOString(),
+      }, { headers: { "x-zhihe-risk-parser": "candidate-fields-v3", "x-zhihe-model-fallback": "timeout" } });
+    }
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "模型检查失败，请稍后重试" },
       { status: 502 },
