@@ -9,6 +9,7 @@ import {
 } from "lucide-react";
 import { demoSubmission } from "@/lib/demo-data";
 import { listLocalTextbooks, removeLocalTextbook, saveLocalTextbook, type LocalTextbook } from "@/lib/browser-textbook-store";
+import { searchTextbook, splitTextbookText } from "@/lib/textbook-search";
 import type { ReviewStatus, RiskItem, RiskScanResult } from "@/lib/types";
 
 type View = "scan" | "textbook";
@@ -19,7 +20,7 @@ type ScanResponse = RiskScanResult & {
   redactionHits: { type: string; replacement: string }[];
 };
 type FileMeta = { name: string; size: number; type: string; pages?: number; characterCount: number; warnings: string[] };
-type Book = { id: string; name: string; meta: string; local?: boolean };
+type Book = { id: string; name: string; meta: string; local?: boolean; chunks?: LocalTextbook["chunks"] };
 
 const checks = [
   { id: "textbook", label: "教材一致性", desc: "定位与指定教材明确冲突的陈述" },
@@ -55,6 +56,8 @@ export function ZhiheApp() {
   const [activeBook, setActiveBook] = useState("book-1");
   const [bookTest, setBookTest] = useState("平台允许所有商品在主图中直接标注最低价。");
   const [bookTestResult, setBookTestResult] = useState("");
+  const [indexingBook, setIndexingBook] = useState(false);
+  const [bookError, setBookError] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
   const bookInputRef = useRef<HTMLInputElement>(null);
 
@@ -65,7 +68,7 @@ export function ZhiheApp() {
         if (!active) return;
         const localBooks: Book[] = storedBooks
           .sort((a, b) => b.addedAt.localeCompare(a.addedAt))
-          .map(({ id, name, meta }) => ({ id, name, meta, local: true }));
+          .map(({ id, name, meta, chunks }) => ({ id, name, meta, chunks, local: true }));
         setBooks((items) => [...localBooks, ...items]);
       })
       .catch(() => active && notify("无法读取本机教材库，当前仍可使用演示教材"));
@@ -127,6 +130,12 @@ export function ZhiheApp() {
     setScanning(true);
     setResult(null);
     try {
+      const selectedBook = books.find((book) => book.id === activeBook);
+      const textbookEvidence = enabledChecks.includes("textbook") && selectedBook?.chunks?.length
+        ? searchTextbook({ name: selectedBook.name, chunks: selectedBook.chunks }, submission)
+        : enabledChecks.includes("textbook")
+          ? [{ source: "跨境电商平台运营（第三版）", location: "第4章第2节（演示）", rule: "商品主图不得直接展示价格或无法验证的促销承诺。" }]
+          : [];
       const response = await fetch("/api/risk-scan", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -136,7 +145,7 @@ export function ZhiheApp() {
           enabledChecks,
           task: "依据课程任务完成作品，并说明数据、素材和AI辅助范围。",
           aiPolicy: "可用于术语解释、思路启发和语言润色；不得虚构数据、替代核心分析或上传敏感信息。",
-          textbookEvidence: enabledChecks.includes("textbook") ? [{ source: "跨境电商平台运营（第三版）", location: "第4章第2节（演示）", rule: "商品主图不得直接展示价格或无法验证的促销承诺。" }] : [],
+          textbookEvidence,
         }),
       });
       const payload = await response.json();
@@ -173,25 +182,41 @@ export function ZhiheApp() {
   async function addDemoBook(event: ChangeEvent<HTMLInputElement>) {
     const selected = event.target.files?.[0];
     if (!selected) return;
+    setBookError("");
+    setIndexingBook(true);
     const id = `book-${Date.now()}`;
-    const textbook: LocalTextbook = {
-      id,
-      name: selected.name,
-      meta: `本机教材 · ${formatSize(selected.size)}`,
-      size: selected.size,
-      type: selected.type,
-      addedAt: new Date().toISOString(),
-      file: selected,
-    };
     try {
+      const form = new FormData();
+      form.append("file", selected);
+      const response = await fetch("/api/submission/extract", { method: "POST", body: form });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error || "教材解析失败");
+      const chunks = splitTextbookText(payload.text);
+      if (!chunks.length) throw new Error("教材没有可用于检索的文本");
+      const textbook: LocalTextbook = {
+        id,
+        name: payload.name,
+        meta: `本机教材 · ${formatSize(payload.size)} · ${chunks.length}段`,
+        size: payload.size,
+        type: payload.type,
+        addedAt: new Date().toISOString(),
+        file: selected,
+        text: payload.text,
+        chunks,
+        pages: payload.pages,
+        characterCount: payload.characterCount,
+        warnings: payload.warnings,
+      };
       await saveLocalTextbook(textbook);
-      setBooks((items) => [{ id, name: textbook.name, meta: textbook.meta, local: true }, ...items]);
+      setBooks((items) => [{ id, name: textbook.name, meta: textbook.meta, chunks: textbook.chunks, local: true }, ...items]);
       setActiveBook(id);
-      notify("教材已保存到当前浏览器");
+      notify("教材已解析并保存到当前浏览器");
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "教材保存失败，请检查浏览器存储空间");
+      setBookError(reason instanceof Error ? reason.message : "教材保存失败，请检查浏览器存储空间");
+    } finally {
+      setIndexingBook(false);
+      event.target.value = "";
     }
-    event.target.value = "";
   }
 
   function removeBook(book: Book) {
@@ -208,6 +233,13 @@ export function ZhiheApp() {
 
   function runBookTest() {
     if (!bookTest.trim()) return setBookTestResult("请输入需要核对的陈述。");
+    const selectedBook = books.find((book) => book.id === activeBook);
+    if (selectedBook?.chunks?.length) {
+      const evidence = searchTextbook({ name: selectedBook.name, chunks: selectedBook.chunks }, bookTest);
+      return setBookTestResult(evidence.length
+        ? `找到 ${evidence.length} 段本机教材依据：${evidence.map((item) => `${item.location}「${item.rule}」`).join("；")}`
+        : "未在当前教材全文中找到直接匹配的段落。请调整陈述关键词，或由教师结合原文进一步核验。");
+    }
     const conflict = /最低价|保证第一|百分之百|允许所有/.test(bookTest);
     setBookTestResult(conflict ? "发现演示冲突：该陈述与教材示例规则不一致，建议教师核实平台依据。此结果不能证明内容由AI生成。" : "未发现与演示教材的直接冲突；真实系统需基于教材检索证据后再判断。" );
   }
@@ -276,9 +308,9 @@ export function ZhiheApp() {
           </div>}
         </section>}
 
-        {view === "textbook" && <section className="page"><PageHeading eyebrow="演示功能" title="教材一致性证据库" description="教材导入、选择和冲突核对都在当前浏览器完成，不建立向量数据库。" />
-          <div className="demo-notice"><Info /><div><strong>教材仅保存到当前浏览器</strong><p>导入的教材文件及其列表信息保存在本机浏览器的 IndexedDB 中，刷新或重新打开页面后仍可使用；不会上传至服务器。删除教材会清除本机副本。当前核对结果仍是流程演示，尚未对教材全文执行检索。</p></div></div>
-          <div className="book-grid"><div className="panel book-list-panel"><div className="panel-title-row"><div><h2>教材列表</h2><p>选择风险检查时使用的课程依据</p></div><button className="secondary-button compact" onClick={() => bookInputRef.current?.click()}><Upload />导入教材</button><input ref={bookInputRef} className="sr-only" type="file" accept=".pdf,.docx,.txt" onChange={addDemoBook} /></div><div className="books">{books.map((book) => <div className={activeBook === book.id ? "book-row selected" : "book-row"} key={book.id} onClick={() => setActiveBook(book.id)} role="button" tabIndex={0}><div className="book-cover"><BookOpen /></div><div><strong>{book.name}</strong><span>{book.meta}</span></div><span className="indexed"><CheckCircle2 />已索引</span><button className="icon-button" onClick={(e) => { e.stopPropagation(); removeBook(book); }} title="删除"><Trash2 /></button></div>)}</div></div>
+        {view === "textbook" && <section className="page"><PageHeading eyebrow="本机教材库" title="教材一致性证据库" description="教材正文在当前浏览器分段保存，并在风险检查前进行本地关键词检索。" />
+          <div className="demo-notice"><Info /><div><strong>教材仅保存到当前浏览器</strong><p>导入时会临时解析文件，再将教材文件、正文和分段索引保存到本机浏览器的 IndexedDB。刷新后仍可检索，删除教材会清除本机副本。教材不会在服务器持久化，作业原文也不会保存。</p></div></div>
+          <div className="book-grid"><div className="panel book-list-panel"><div className="panel-title-row"><div><h2>教材列表</h2><p>选择风险检查时使用的课程依据</p></div><button className="secondary-button compact" onClick={() => bookInputRef.current?.click()} disabled={indexingBook}>{indexingBook ? <LoaderCircle className="spin" /> : <Upload />}{indexingBook ? "解析教材中" : "导入教材"}</button><input ref={bookInputRef} className="sr-only" type="file" accept=".pdf,.docx,.txt,.md,.csv,.json" onChange={addDemoBook} /></div>{bookError && <div className="error-message"><AlertTriangle />{bookError}</div>}<div className="books">{books.map((book) => <div className={activeBook === book.id ? "book-row selected" : "book-row"} key={book.id} onClick={() => setActiveBook(book.id)} role="button" tabIndex={0}><div className="book-cover"><BookOpen /></div><div><strong>{book.name}</strong><span>{book.meta}</span></div><span className="indexed"><CheckCircle2 />{book.chunks?.length ? "已解析" : "演示"}</span><button className="icon-button" onClick={(e) => { e.stopPropagation(); removeBook(book); }} title="删除"><Trash2 /></button></div>)}</div></div>
           <div className="panel book-test-panel"><span className="eyebrow"><SearchCheck />一致性试查</span><h2>验证教材核验交互</h2><p>输入一条学生作品中的陈述，系统演示如何返回“原文证据 + 教材依据 + 边界说明”。</p><label className="field-label" htmlFor="book-test">待核对陈述</label><textarea id="book-test" value={bookTest} onChange={(e) => { setBookTest(e.target.value); setBookTestResult(""); }} /><button className="primary-button" onClick={runBookTest}><SearchCheck />对照当前教材</button>{bookTestResult && <div className="book-result"><AlertTriangle /><p>{bookTestResult}</p></div>}</div></div>
         </section>}
 

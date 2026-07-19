@@ -6,6 +6,17 @@ export type LocalTextbook = {
   type: string;
   addedAt: string;
   file: Blob;
+  text: string;
+  chunks: TextbookChunk[];
+  pages?: number;
+  characterCount: number;
+  warnings: string[];
+};
+
+export type TextbookChunk = {
+  id: string;
+  location: string;
+  text: string;
 };
 
 const databaseName = "zhihe-textbook-library";
