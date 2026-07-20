@@ -270,6 +270,76 @@ function parseJsonValues(value: unknown) {
   return parsedValues;
 }
 
+function completeObjectFrom(text: string, searchStart: number) {
+  const start = text.indexOf("{", searchStart);
+  if (start < 0) return undefined;
+
+  let depth = 0;
+  let quote = "";
+  let escaped = false;
+  for (let index = start; index < text.length; index += 1) {
+    const character = text[index];
+    if (quote) {
+      if (escaped) escaped = false;
+      else if (character === "\\") escaped = true;
+      else if (character === quote) quote = "";
+      continue;
+    }
+    if (character === '"' || character === "'") quote = character;
+    else if (character === "{") depth += 1;
+    else if (character === "}" && depth > 0) {
+      depth -= 1;
+      if (depth === 0) return text.slice(start, index + 1);
+    }
+  }
+  return undefined;
+}
+
+function riskArrayObjectSlices(text: string) {
+  const arrays: string[][] = [];
+  for (const key of ["riskItems", "risk_items", "risks"]) {
+    const marker = new RegExp(`["']${key}["']\\s*:\\s*\\[`, "gi");
+    for (const match of text.matchAll(marker)) {
+      const slices: string[] = [];
+      let objectStart = -1;
+      let objectDepth = 0;
+      let quote = "";
+      let escaped = false;
+      const arrayStart = (match.index ?? 0) + match[0].length;
+
+      for (let index = arrayStart; index < text.length; index += 1) {
+        const character = text[index];
+        if (quote) {
+          if (escaped) escaped = false;
+          else if (character === "\\") escaped = true;
+          else if (character === quote) quote = "";
+          continue;
+        }
+        if (character === '"' || character === "'") {
+          quote = character;
+        } else if (character === "{") {
+          if (objectDepth === 0) objectStart = index;
+          objectDepth += 1;
+        } else if (character === "}" && objectDepth > 0) {
+          objectDepth -= 1;
+          if (objectDepth === 0 && objectStart >= 0) {
+            slices.push(text.slice(objectStart, index + 1));
+            objectStart = -1;
+          }
+        } else if (character === "]" && objectDepth === 0) {
+          break;
+        }
+      }
+
+      // The last object may be truncated, but jsonrepair can still recover it when
+      // the identifying fields were emitted before the cutoff.
+      if (objectStart >= 0) slices.push(text.slice(objectStart));
+      if (slices.length) arrays.push(slices.slice(0, 8));
+    }
+  }
+  return arrays;
+}
+
 function reportRoots(value: unknown, depth = 0): UnknownRecord[] {
   if (depth > 3) return [];
   if (Array.isArray(value)) return value.flatMap((item) => reportRoots(item, depth + 1));
@@ -354,6 +424,27 @@ export function normalizeRiskScanResult(value: unknown): RiskScanResult | null {
   return null;
 }
 
+function salvageTruncatedRiskReport(text: string): RiskScanResult | null {
+  let summary: UnknownRecord = {};
+  const summaryMarker = /["']summary["']\s*:\s*/i.exec(text);
+  if (summaryMarker) {
+    const summaryText = completeObjectFrom(text, summaryMarker.index + summaryMarker[0].length);
+    const parsedSummary = summaryText ? parseJsonValues(summaryText).find((entry) => isRecord(entry.value)) : undefined;
+    if (parsedSummary && isRecord(parsedSummary.value)) summary = parsedSummary.value;
+  }
+
+  for (const slices of riskArrayObjectSlices(text.slice(0, 200_000))) {
+    const riskItems: UnknownRecord[] = [];
+    for (const slice of slices) {
+      const parsedItem = parseJsonValues(slice).find((entry) => isRecord(entry.value));
+      if (parsedItem && isRecord(parsedItem.value)) riskItems.push(parsedItem.value);
+    }
+    const result = normalizeRiskScanResult({ summary, riskItems });
+    if (result?.riskItems.length) return result;
+  }
+  return null;
+}
+
 export function parseRiskScanModelResponse(payload: unknown): ParsedModelReport | null {
   for (const candidate of extractModelCandidates(payload)) {
     for (const parsed of parseJsonValues(candidate.value)) {
@@ -367,6 +458,10 @@ export function parseRiskScanModelResponse(payload: unknown): ParsedModelReport 
           }
         }
       }
+    }
+    if (typeof candidate.value === "string") {
+      const salvaged = salvageTruncatedRiskReport(candidate.value);
+      if (salvaged) return { result: salvaged, source: candidate.source, repaired: true };
     }
   }
   return null;

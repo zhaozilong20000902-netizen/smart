@@ -44,6 +44,16 @@ test("repairs truncated JSON and drops the incomplete trailing item", () => {
   assert.equal(parsed?.result.riskItems[0].id, "risk-1");
 });
 
+test("salvages complete risk items when the enclosing JSON cannot be repaired", () => {
+  const truncated = `模型草稿<{"summary":{"reviewPriority":40,"priorityLevel":"一般"},"riskItems":[${JSON.stringify(completeItem)},\u0000{"id":"risk-2","title":"未完成`;
+  const parsed = parseRiskScanModelResponse({
+    choices: [{ message: { reasoning_content: truncated }, finish_reason: "length" }],
+  });
+  assert.equal(parsed?.repaired, true);
+  assert.equal(parsed?.result.riskItems.length, 1);
+  assert.equal(parsed?.result.riskItems[0].id, "risk-1");
+});
+
 test("reads function-call arguments", () => {
   const parsed = parseRiskScanModelResponse({
     choices: [{ message: { tool_calls: [{ function: { arguments: JSON.stringify(report) } }] } }],
