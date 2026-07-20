@@ -6,9 +6,11 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "test": "node --experimental-strip-types --test tests/*.test.mjs"
   },
   "dependencies": {
+    "jsonrepair": "3.15.0",
     "lucide-react": "^0.468.0",
     "mammoth": "^1.12.0",
     "next": "16.2.10",

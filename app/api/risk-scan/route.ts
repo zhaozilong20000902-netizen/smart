@@ -1,78 +1,34 @@
 import { NextRequest, NextResponse } from "next/server";
 import { demoRiskResult } from "@/lib/demo-data";
+import { modelResponseDiagnostics, parseRiskScanModelResponse, parseUpstreamPayload } from "@/lib/model-response";
 import { riskScanSystemPrompt } from "@/lib/prompts";
 import { redactSensitiveText } from "@/lib/redaction";
+import { buildLocalRiskFallback } from "@/lib/risk-fallback";
 import { riskScanSchema } from "@/lib/schema";
 import type { RiskScanResult } from "@/lib/types";
 
 export const runtime = "nodejs";
 export const maxDuration = 30;
 
-function parseModelJson(value: unknown) {
-  if (typeof value !== "string") return value;
-  const cleaned = value.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
-  try {
-    return JSON.parse(cleaned);
-  } catch {
-    const start = cleaned.indexOf("{");
-    if (start >= 0) {
-      let depth = 0;
-      let inString = false;
-      let escaped = false;
-      for (let index = start; index < cleaned.length; index += 1) {
-        const character = cleaned[index];
-        if (inString) {
-          if (escaped) escaped = false;
-          else if (character === "\\") escaped = true;
-          else if (character === '"') inString = false;
-          continue;
-        }
-        if (character === '"') inString = true;
-        else if (character === "{") depth += 1;
-        else if (character === "}") {
-          depth -= 1;
-          if (depth === 0) return JSON.parse(cleaned.slice(start, index + 1));
-        }
-      }
-    }
-    throw new Error("模型未返回有效JSON");
+type ModelMode = "model" | "demo";
+type ModelFailureCode = "timeout" | "upstream" | "invalid-output";
+
+class ModelFailure extends Error {
+  code: ModelFailureCode;
+
+  constructor(code: ModelFailureCode, message: string) {
+    super(message);
+    this.name = "ModelFailure";
+    this.code = code;
   }
 }
 
-function preview(value: unknown) {
-  return JSON.stringify(value, null, 2)?.slice(0, 1200);
-}
-
-function extractModelContent(data: unknown) {
-  if (!data || typeof data !== "object") return undefined;
-  const payload = data as Record<string, any>;
-  const choice = payload.choices?.[0];
-  const candidates = [
-    choice?.message?.content,
-    choice?.message?.reasoning_content,
-    choice?.text,
-    payload.output_text,
-  ];
-  for (const candidate of candidates) {
-    if (typeof candidate === "string" && candidate.trim()) return candidate;
-    if (Array.isArray(candidate)) {
-      const joined = candidate.map((part) => part?.text || part?.content || "").filter(Boolean).join("\n");
-      if (joined.trim()) return joined;
-    }
-  }
-  if (Array.isArray(payload.output)) {
-    const joinedOutput = payload.output
-      .flatMap((item) => item?.content || [])
-      .map((part) => part?.text || "")
-      .filter(Boolean)
-      .join("\n");
-    if (joinedOutput.trim()) return joinedOutput;
-  }
-
-  return undefined;
-}
-
-async function runModel(input: Record<string, unknown>, redacted: string): Promise<{ result: RiskScanResult; mode: string }> {
+async function runModel(input: Record<string, unknown>, redacted: string): Promise<{
+  result: RiskScanResult;
+  mode: ModelMode;
+  source?: string;
+  repaired?: boolean;
+}> {
   const endpoint = process.env.MODEL_API_URL;
   const apiKey = process.env.MODEL_API_KEY;
   const model = process.env.MODEL_NAME;
@@ -89,6 +45,7 @@ async function runModel(input: Record<string, unknown>, redacted: string): Promi
         model,
         temperature: 0.1,
         max_tokens: 2400,
+        stream: false,
         enable_thinking: false,
         response_format: { type: "json_object" },
         messages: [
@@ -107,25 +64,40 @@ async function runModel(input: Record<string, unknown>, redacted: string): Promi
         ],
       }),
     });
-    if (!response.ok) throw new Error(`模型接口返回 ${response.status}`);
-    const data = await response.json();
-    const raw = extractModelContent(data);
-    if (!raw) {
-      console.error("risk-scan empty model content", preview(data));
-      throw new Error("模型接口响应中没有找到可解析内容");
+    const rawResponse = await response.text();
+    if (!response.ok) throw new ModelFailure("upstream", `模型接口返回 ${response.status}`);
+    const data = parseUpstreamPayload(rawResponse);
+    const parsed = parseRiskScanModelResponse(data);
+    if (!parsed) {
+      console.warn("risk-scan model output rejected", modelResponseDiagnostics(data, rawResponse.length));
+      throw new ModelFailure("invalid-output", "模型输出未通过JSON结构校验");
     }
 
-    const parsed = parseModelJson(raw);
-    const result = riskScanSchema.safeParse(parsed);
+    const result = riskScanSchema.safeParse(parsed.result);
     if (!result.success) {
-      console.error("risk-scan invalid model schema", result.error.flatten(), preview(parsed));
-      throw new Error("模型JSON结构不符合风险报告格式");
+      console.warn("risk-scan normalized schema rejected", {
+        ...modelResponseDiagnostics(data, rawResponse.length),
+        issues: result.error.issues.map((issue) => issue.path.join(".")).slice(0, 8),
+      });
+      throw new ModelFailure("invalid-output", "模型JSON结构不符合风险报告格式");
     }
 
-    return { result: result.data, mode: "model" };
+    return { result: result.data, mode: "model", source: parsed.source, repaired: parsed.repaired };
+  } catch (error) {
+    if (error instanceof ModelFailure) throw error;
+    if (error instanceof Error && (error.name === "AbortError" || /aborted|timeout/i.test(error.message))) {
+      throw new ModelFailure("timeout", "模型响应超时");
+    }
+    throw new ModelFailure("upstream", error instanceof Error ? error.message : "模型服务不可用");
   } finally {
     clearTimeout(timeout);
   }
+}
+
+function fallbackWarning(code: ModelFailureCode) {
+  if (code === "timeout") return "模型响应超时，已使用本地规则生成本次报告。";
+  if (code === "invalid-output") return "模型返回内容不完整或格式异常，已使用本地规则生成本次报告。";
+  return "模型服务暂时不可用，已使用本地规则生成本次报告。";
 }
 
 export async function POST(request: NextRequest) {
@@ -140,28 +112,38 @@ export async function POST(request: NextRequest) {
   const { redacted, hits } = redactSensitiveText(body.submission);
   try {
     const analysis = await runModel(body, redacted);
+    const headers: Record<string, string> = {
+      "x-zhihe-risk-parser": "resilient-v4",
+      "x-zhihe-model-source": analysis.source || analysis.mode,
+    };
+    if (analysis.repaired) headers["x-zhihe-model-output"] = "repaired";
     return NextResponse.json({
       ...analysis.result,
       redactionHits: hits.map(({ type, replacement }) => ({ type, replacement })),
       mode: analysis.mode,
       storage: "none",
       checkedAt: new Date().toISOString(),
-    }, { headers: { "x-zhihe-risk-parser": "candidate-fields-v3" } });
+    }, { headers });
   } catch (error) {
-    console.error("risk-scan failed", error);
-    if (error instanceof Error && error.name === "AbortError") {
-      return NextResponse.json({
-        ...demoRiskResult,
-        redactionHits: hits.map(({ type, replacement }) => ({ type, replacement })),
-        mode: "demo",
-        modelWarning: "模型响应超时，已返回演示结果。可更换响应更快的模型，或稍后重试。",
-        storage: "none",
-        checkedAt: new Date().toISOString(),
-      }, { headers: { "x-zhihe-risk-parser": "candidate-fields-v3", "x-zhihe-model-fallback": "timeout" } });
-    }
-    return NextResponse.json(
-      { error: error instanceof Error ? error.message : "模型检查失败，请稍后重试" },
-      { status: 502 },
-    );
+    const failure = error instanceof ModelFailure ? error : new ModelFailure("upstream", "模型检查失败");
+    console.warn("risk-scan local fallback", { code: failure.code, message: failure.message });
+    const fallback = buildLocalRiskFallback({
+      input: body,
+      redacted,
+      redactionHits: hits.map(({ type, replacement }) => ({ type, replacement })),
+    });
+    return NextResponse.json({
+      ...fallback,
+      redactionHits: hits.map(({ type, replacement }) => ({ type, replacement })),
+      mode: "fallback",
+      modelWarning: fallbackWarning(failure.code),
+      storage: "none",
+      checkedAt: new Date().toISOString(),
+    }, {
+      headers: {
+        "x-zhihe-risk-parser": "resilient-v4",
+        "x-zhihe-model-fallback": failure.code,
+      },
+    });
   }
 }
